@@ -10,7 +10,9 @@ const DATA = path.join(__dirname, 'data');
 const UPLOADS = path.join(DATA, 'uploads');
 const USERS_FILE = path.join(DATA, 'users.json');
 const MSGS_FILE = path.join(DATA, 'messages.json');
+const SESSIONS_FILE = path.join(DATA, 'sessions.json');
 const MAX_FILE = 25 * 1024 * 1024; // 25 MB
+const SESSION_MAX_AGE = 60 * 60 * 24 * 365 * 5; // 5 años: en la práctica, hasta que cierren sesión a mano
 
 fs.mkdirSync(UPLOADS, { recursive: true });
 if (!fs.existsSync(USERS_FILE)) {
@@ -30,8 +32,23 @@ function saveMessages() {
   }, 100);
 }
 
-// ---------- Sesiones ----------
+// ---------- Sesiones (persistidas a disco: sobreviven a un reinicio del servidor) ----------
 const sessions = new Map(); // token -> username
+if (fs.existsSync(SESSIONS_FILE)) {
+  try {
+    const saved = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    for (const [token, user] of Object.entries(saved)) if (users[user]) sessions.set(token, user);
+  } catch {}
+}
+let sessionSaveTimer = null;
+function saveSessions() {
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    fs.writeFile(SESSIONS_FILE + '.tmp', JSON.stringify(Object.fromEntries(sessions)), (err) => {
+      if (!err) fs.rename(SESSIONS_FILE + '.tmp', SESSIONS_FILE, () => {});
+    });
+  }, 100);
+}
 function parseCookies(req) {
   const out = {};
   (req.headers.cookie || '').split(';').forEach((c) => {
@@ -75,13 +92,17 @@ app.post('/api/login', (req, res) => {
   }
   const token = crypto.randomBytes(32).toString('hex');
   sessions.set(token, user);
-  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${60 * 60 * 24 * 30}`);
+  saveSessions();
+  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE}`);
   res.json({ user });
 });
 
 app.post('/api/logout', (req, res) => {
   const t = parseCookies(req).sid;
-  if (t) sessions.delete(t);
+  if (t) {
+    sessions.delete(t);
+    saveSessions();
+  }
   res.setHeader('Set-Cookie', 'sid=; HttpOnly; Path=/; Max-Age=0');
   res.json({ ok: true });
 });
