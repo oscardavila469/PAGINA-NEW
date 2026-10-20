@@ -76,6 +76,35 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let me = null, other = null, ws = null, lastDay = '', typingTimer = null, lastTypingSent = 0;
+let unread = 0;
+const baseTitle = document.title;
+let audioCtx = null;
+
+function beep() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.frequency.value = 880; g.gain.value = 0.08;
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+    o.stop(audioCtx.currentTime + 0.25);
+  } catch {}
+}
+
+function notifyIncoming(msg) {
+  if (document.hasFocus()) return; // ya la estás viendo, no hace falta avisar
+  unread++;
+  document.title = `(${unread}) ${baseTitle}`;
+  beep();
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const body = msg.file ? `📎 ${msg.file.name}` : msg.text;
+    const n = new Notification(msg.from, { body, tag: 'chat-privado' });
+    n.onclick = () => { window.focus(); n.close(); };
+  }
+}
+
+window.addEventListener('focus', () => { unread = 0; document.title = baseTitle; });
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -103,6 +132,7 @@ async function start() {
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('other').textContent = other;
+  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   connect();
 }
 
@@ -111,7 +141,10 @@ function connect() {
   ws.onmessage = (ev) => {
     const d = JSON.parse(ev.data);
     if (d.type === 'history') { $('msgs').innerHTML = ''; lastDay = ''; d.messages.forEach(render); scrollDown(); }
-    else if (d.type === 'msg') { render(d.message); scrollDown(); }
+    else if (d.type === 'msg') {
+      render(d.message); scrollDown();
+      if (d.message.from !== me) notifyIncoming(d.message);
+    }
     else if (d.type === 'presence') {
       const o = d.users.find((x) => x.user === other);
       $('dot').classList.toggle('on', !!(o && o.online));
