@@ -37,9 +37,12 @@
   .m img { max-width:100%; max-height:320px; border-radius:10px; display:block; margin-bottom:4px; }
   .m a.file { color:inherit; text-decoration:underline; }
   #typing { height:18px; padding:0 18px; font-size:12px; color:var(--muted); }
-  #bar { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); align-items:flex-end; }
+  #bar { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); align-items:flex-end; position:relative; }
   #bar textarea { resize:none; max-height:140px; }
-  #attach { background:transparent; color:var(--muted); font-size:20px; padding:6px 10px; }
+  #attach, #emojiBtn { background:transparent; color:var(--muted); font-size:20px; padding:6px 10px; }
+  #emojiPanel { position:absolute; bottom:56px; left:12px; width:280px; max-height:220px; overflow-y:auto; background:var(--panel); border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 28px rgba(0,0,0,.18); padding:8px; display:grid; grid-template-columns:repeat(7, 1fr); gap:2px; }
+  #emojiPanel button { background:transparent; padding:4px; font-size:20px; border-radius:8px; line-height:1; }
+  #emojiPanel button:hover { background:var(--them); }
 </style>
 </head>
 <body>
@@ -66,6 +69,8 @@
   <div id="msgs"></div>
   <div id="typing"></div>
   <div id="bar">
+    <div id="emojiPanel" class="hidden"></div>
+    <button id="emojiBtn" title="Emojis">😀</button>
     <button id="attach" title="Adjuntar archivo">📎</button>
     <input type="file" id="file" class="hidden">
     <textarea id="text" rows="1" placeholder="Escribe un mensaje…"></textarea>
@@ -197,6 +202,28 @@ $('text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shift
 $('text').addEventListener('input', (e) => {
   e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px';
   if (Date.now() - lastTypingSent > 1000 && ws && ws.readyState === 1) { ws.send(JSON.stringify({ type: 'typing' })); lastTypingSent = Date.now(); }
+});
+
+const EMOJIS = ['😀','😂','😍','😊','😉','😘','🥰','😎','🤔','😅','😢','😭','😡','😴','😮','🙄','😇','🤗','🥳','😏',
+  '👍','👎','👏','🙏','💪','🤝','✋','👌','🤞','🫶','❤️','💔','💕','💯','🔥','✨','🎉','🎂','🌟','☀️',
+  '🌙','☕','🍕','🍔','🍺','🍷','⚽','🏀','🚗','✈️','📍','📞','⏰','📌','✅','❌','❓','❗','💤','🎵'];
+const panel = $('emojiPanel');
+EMOJIS.forEach((e) => {
+  const b = document.createElement('button'); b.type = 'button'; b.textContent = e;
+  b.onclick = () => insertEmoji(e);
+  panel.appendChild(b);
+});
+function insertEmoji(e) {
+  const t = $('text');
+  const start = t.selectionStart ?? t.value.length, end = t.selectionEnd ?? t.value.length;
+  t.value = t.value.slice(0, start) + e + t.value.slice(end);
+  t.focus();
+  t.selectionStart = t.selectionEnd = start + e.length;
+  t.dispatchEvent(new Event('input'));
+}
+$('emojiBtn').onclick = (ev) => { ev.stopPropagation(); panel.classList.toggle('hidden'); };
+document.addEventListener('click', (ev) => {
+  if (!panel.classList.contains('hidden') && !panel.contains(ev.target) && ev.target !== $('emojiBtn')) panel.classList.add('hidden');
 });
 
 $('attach').onclick = () => $('file').click();
