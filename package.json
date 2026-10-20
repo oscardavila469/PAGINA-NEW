@@ -1,0 +1,14 @@
+{
+  "name": "chat-privado",
+  "version": "1.0.0",
+  "description": "Portal de chat privado entre dos personas",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "node setup-users.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}
