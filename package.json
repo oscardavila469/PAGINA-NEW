@@ -1,7 +1,7 @@
 {
-  "name": "chat-privado",
-  "version": "1.0.0",
-  "description": "Portal de chat privado entre dos personas",
+  "name": "notas",
+  "version": "1.1.0",
+  "description": "Portal de mensajería entre dos personas",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "web-push": "^3.6.7"
   }
 }
