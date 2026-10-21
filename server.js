@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
+const webpush = require('web-push');
 
 const PORT = process.env.PORT || 3000;
 const DATA = path.join(__dirname, 'data');
@@ -11,6 +12,9 @@ const UPLOADS = path.join(DATA, 'uploads');
 const USERS_FILE = path.join(DATA, 'users.json');
 const MSGS_FILE = path.join(DATA, 'messages.json');
 const SESSIONS_FILE = path.join(DATA, 'sessions.json');
+const READ_FILE = path.join(DATA, 'read.json');
+const PUSH_FILE = path.join(DATA, 'push-subs.json');
+const VAPID_FILE = path.join(DATA, 'vapid.json');
 const MAX_FILE = 25 * 1024 * 1024; // 25 MB
 const SESSION_MAX_AGE = 60 * 60 * 24 * 365 * 5; // 5 años: en la práctica, hasta que cierren sesión a mano
 
@@ -21,6 +25,61 @@ if (!fs.existsSync(USERS_FILE)) {
 }
 const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
 let messages = fs.existsSync(MSGS_FILE) ? JSON.parse(fs.readFileSync(MSGS_FILE, 'utf8')) : [];
+
+// ---------- Confirmación de lectura: username -> timestamp del último mensaje leído ----------
+let readState = fs.existsSync(READ_FILE) ? JSON.parse(fs.readFileSync(READ_FILE, 'utf8')) : {};
+let readSaveTimer = null;
+function saveReadState() {
+  clearTimeout(readSaveTimer);
+  readSaveTimer = setTimeout(() => {
+    fs.writeFile(READ_FILE + '.tmp', JSON.stringify(readState), (err) => {
+      if (!err) fs.rename(READ_FILE + '.tmp', READ_FILE, () => {});
+    });
+  }, 100);
+}
+
+// ---------- Notificaciones push (funcionan con el navegador/pestaña cerrada) ----------
+let vapid;
+if (fs.existsSync(VAPID_FILE)) {
+  vapid = JSON.parse(fs.readFileSync(VAPID_FILE, 'utf8'));
+} else {
+  vapid = webpush.generateVAPIDKeys();
+  fs.writeFileSync(VAPID_FILE, JSON.stringify(vapid, null, 2), { mode: 0o600 });
+}
+webpush.setVapidDetails('mailto:admin@localhost', vapid.publicKey, vapid.privateKey);
+
+let pushSubs = fs.existsSync(PUSH_FILE) ? JSON.parse(fs.readFileSync(PUSH_FILE, 'utf8')) : {}; // username -> [subscription,...]
+let pushSaveTimer = null;
+function savePushSubs() {
+  clearTimeout(pushSaveTimer);
+  pushSaveTimer = setTimeout(() => {
+    fs.writeFile(PUSH_FILE + '.tmp', JSON.stringify(pushSubs), (err) => {
+      if (!err) fs.rename(PUSH_FILE + '.tmp', PUSH_FILE, () => {});
+    });
+  }, 100);
+}
+function pushToUser(username, payload) {
+  const subs = pushSubs[username];
+  if (!subs || !subs.length) return;
+  const keep = [];
+  let changed = false;
+  Promise.allSettled(
+    subs.map((sub) =>
+      webpush.sendNotification(sub, JSON.stringify(payload)).then(
+        () => keep.push(sub),
+        (err) => {
+          changed = true;
+          if (!(err.statusCode === 404 || err.statusCode === 410)) keep.push(sub); // conserva la suscripción salvo que esté muerta
+        }
+      )
+    )
+  ).then(() => {
+    if (changed) {
+      pushSubs[username] = keep;
+      savePushSubs();
+    }
+  });
+}
 
 let saveTimer = null;
 function saveMessages() {
@@ -81,6 +140,7 @@ function tooMany(ip) {
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '10kb' }));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.post('/api/login', (req, res) => {
   const ip = req.socket.remoteAddress;
@@ -159,6 +219,32 @@ app.get('/api/file/:id', (req, res) => {
   fs.createReadStream(fp).pipe(res);
 });
 
+app.get('/api/vapid-public-key', (req, res) => {
+  const u = userFromReq(req);
+  if (!u) return res.status(401).json({ error: 'No autenticado' });
+  res.json({ key: vapid.publicKey });
+});
+
+app.post('/api/push-subscribe', (req, res) => {
+  const u = userFromReq(req);
+  if (!u) return res.status(401).json({ error: 'No autenticado' });
+  const sub = req.body;
+  if (!sub || typeof sub.endpoint !== 'string') return res.status(400).json({ error: 'Suscripción inválida' });
+  if (!pushSubs[u]) pushSubs[u] = [];
+  if (!pushSubs[u].some((s) => s.endpoint === sub.endpoint)) pushSubs[u].push(sub);
+  savePushSubs();
+  res.json({ ok: true });
+});
+
+app.post('/api/push-unsubscribe', (req, res) => {
+  const u = userFromReq(req);
+  if (!u) return res.status(401).json({ error: 'No autenticado' });
+  const endpoint = req.body && req.body.endpoint;
+  if (pushSubs[u]) pushSubs[u] = pushSubs[u].filter((s) => s.endpoint !== endpoint);
+  savePushSubs();
+  res.json({ ok: true });
+});
+
 // Página
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
@@ -193,6 +279,7 @@ wss.on('connection', (ws) => {
   if (!online.has(ws.user)) online.set(ws.user, new Set());
   online.get(ws.user).add(ws);
   send(ws, { type: 'history', messages });
+  send(ws, { type: 'readstate', state: readState });
   broadcast({ type: 'presence', users: presence() });
 
   ws.on('message', (raw) => {
@@ -207,13 +294,33 @@ wss.on('connection', (ws) => {
       const file = m.file && typeof m.file.id === 'string'
         ? { id: m.file.id.replace(/[^a-f0-9]/g, ''), name: String(m.file.name || '').slice(0, 200), type: String(m.file.type || ''), size: Number(m.file.size) || 0 }
         : null;
+      const srcReply = m.replyTo;
+      const replyTo = srcReply && typeof srcReply.id === 'string' && messages.some((x) => x.id === srcReply.id)
+        ? { id: srcReply.id, from: String(srcReply.from || '').slice(0, 60), text: String(srcReply.text || '').slice(0, 300) }
+        : null;
       if (!text.trim() && !file) return;
-      const msg = { id: crypto.randomBytes(8).toString('hex'), from: ws.user, text, file, ts: Date.now() };
+      const msg = { id: crypto.randomBytes(8).toString('hex'), from: ws.user, text, file, replyTo, ts: Date.now() };
       messages.push(msg);
       saveMessages();
       broadcast({ type: 'msg', message: msg });
+      for (const name of Object.keys(users)) {
+        if (name === ws.user) continue;
+        pushToUser(name, {
+          title: ws.user,
+          body: file ? `📎 ${file.name}` : text.slice(0, 180),
+          tag: 'notas-msg',
+          url: '/',
+        });
+      }
     } else if (m.type === 'typing') {
       for (const [name, set] of online) if (name !== ws.user) set.forEach((o) => send(o, { type: 'typing', user: ws.user }));
+    } else if (m.type === 'read') {
+      const upto = Number(m.upto) || 0;
+      if (upto > (readState[ws.user] || 0)) {
+        readState[ws.user] = upto;
+        saveReadState();
+        broadcast({ type: 'read_update', user: ws.user, upto });
+      }
     }
   });
 
